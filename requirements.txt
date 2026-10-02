@@ -1,0 +1,11 @@
+# notebook
+langchain
+langchain_community
+python-dotenv
+ipykernel
+langgraph-cli[inmem]
+boto3
+bedrock-agentcore
+langchain-aws
+langchain-mcp-adapters 
+pdf2image
