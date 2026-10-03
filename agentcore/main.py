@@ -3,9 +3,9 @@ import asyncio
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-from graphs.builder import GraphBuilder   # your existing graph
-from llms.bedrock import BedrockLLM
-from streaming import stream_answer
+from agentcore.graphs.builder import GraphBuilder   # your existing graph
+from agentcore.llms.bedrock import BedrockLLM
+from agentcore.streaming import stream_answer
 
 app = BedrockAgentCoreApp()
 llm = BedrockLLM().get_llm()
