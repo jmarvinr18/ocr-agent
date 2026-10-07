@@ -26,6 +26,15 @@ class AnalyzerNode:
         self.VISION_DPI = 100
         self.tool = tool
         self.llm = llm
+        # Nova emits malformed ToolUse ("Model produced invalid sequence") unless decoding is greedy,
+        # and with_structured_output is a forced tool call, so the classifier gets temperature 0 / topK 1.
+        self.classifier_llm = llm.model_copy(update={
+            "temperature": 0,
+            "additional_model_request_fields": {
+                **(llm.additional_model_request_fields or {}),
+                "inferenceConfig": {"topK": 1},
+            },
+        })
 
 
     def analyze(self, state: AgentState):
@@ -79,7 +88,7 @@ class AnalyzerNode:
             content.append({"type": "text", "text": label})
             content.append({"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": image_b64}})
 
-        return self.llm.with_structured_output(DocumentType).invoke([HumanMessage(content=content)])
+        return self.classifier_llm.with_structured_output(DocumentType).invoke([HumanMessage(content=content)])
 
     def analyze_document(self, state):
         """
@@ -119,7 +128,12 @@ class AnalyzerNode:
         else:
             raise ValueError(f"Unsupported file type: {mime_type}")
 
-        result = self._classify_with_vision(images)
+        try:
+            result = self._classify_with_vision(images)
+        except Exception as e:
+            # The multimodal parser handles plain documents too, so it is the safe fallback.
+            print(f"---CLASSIFICATION FAILED ({e}), DEFAULTING TO MULTIMODAL---")
+            return "multimodal"
         print(f"CLASIFICATION VISION RESPONSE: {result}")
 
         if result.binary_score == "plain":

@@ -14,6 +14,7 @@ dependencies = [
     "langchain-mcp-adapters>=0.3.2",
     "langchain-tavily>=0.2.18",
     "langgraph-cli[inmem]>=0.4.32",
+    "nltk>=3.10.3",
     "notebook>=7.6.3",
     "pdf2image>=1.17.0",
     "pymupdf>=1.28.2",

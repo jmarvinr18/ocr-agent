@@ -109,7 +109,7 @@ class DocumentParser():
             Parse the document content (local path or URL) by analyzing its images
             with Bedrock and extracting text.
         """
-        print(f"SOURCEsdfs: {source}")
+        print(f"SOURCE: {source}")
 
         if not source:
             return None
