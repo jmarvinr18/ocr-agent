@@ -143,7 +143,10 @@ module "function" {
   timeout          = var.timeout
   memory_size      = var.memory_size
 
-  environment_variables = var.environment_variables
+  environment_variables = merge(var.environment_variables, {
+    OUTPUT_BUCKET = var.s3_bucket
+    OUTPUT_PREFIX = var.output_prefix
+  })
 
   tags = var.tags
 }

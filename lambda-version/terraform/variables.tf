@@ -53,6 +53,12 @@ variable "s3_bucket" {
   description = "S3 bucket the function is allowed to read/write."
 }
 
+variable "output_prefix" {
+  type        = string
+  default     = "markdown/"
+  description = "Key prefix in s3_bucket where the generated .md files are written."
+}
+
 variable "environment_variables" {
   type    = map(string)
   default = {}
