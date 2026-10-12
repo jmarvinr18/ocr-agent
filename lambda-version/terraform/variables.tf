@@ -59,6 +59,31 @@ variable "output_prefix" {
   description = "Key prefix in s3_bucket where the generated .md files are written."
 }
 
+variable "upload_prefix" {
+  type        = string
+  default     = "uploads/"
+  description = "Key prefix in s3_bucket where documents uploaded from the UI are stored."
+}
+
+variable "upload_api_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Access key the UI must send (x-api-key) to call the function URL. Empty disables the check."
+}
+
+variable "ui_allowed_origins" {
+  type        = list(string)
+  default     = ["*"]
+  description = "Origins allowed to call the function URL and upload to the bucket from a browser."
+}
+
+variable "manage_bucket_cors" {
+  type        = bool
+  default     = true
+  description = "Manage the bucket's CORS rules for browser uploads. Replaces any existing CORS rules."
+}
+
 variable "environment_variables" {
   type    = map(string)
   default = {}

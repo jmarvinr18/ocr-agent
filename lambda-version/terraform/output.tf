@@ -13,3 +13,8 @@ output "invoke_arn" {
 output "role_arn" {
   value = module.role.arn
 }
+
+output "function_url" {
+  description = "Endpoint to set in the upload UI."
+  value       = aws_lambda_function_url.this.function_url
+}
