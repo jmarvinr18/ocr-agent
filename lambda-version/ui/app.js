@@ -2,16 +2,18 @@
    Document Processor — upload UI (vanilla JS)
 
    Flow per file
-   1. POST { action: 'create_upload', filename } to the Lambda function URL
+   1. POST { action: 'create_upload', filename } to the API (ALB → Lambda)
       → presigned S3 POST (url + fields)
    2. Upload the file straight to S3 with that presigned POST
-   3. POST { action: 'process', key } → Lambda converts it to Markdown,
-      saves the .md to S3 and returns presigned links
+   3. POST { action: 'process', key } → Lambda queues the conversion and
+      returns at once (the ALB would time out on long documents)
+   4. POST { action: 'status', key } every few seconds until the .md is
+      saved → presigned links
 
    Structure
    - CONFIG   : limits and accepted file types
-   - settings : function URL + access key, kept in localStorage
-   - api      : calls to the Lambda function URL and S3
+   - settings : API path + access key, kept in localStorage
+   - api      : calls to the API and S3
    - state    : list of uploads
    - render   : DOM renderer driven by state
    - events   : wiring
@@ -25,8 +27,10 @@
   const CONFIG = {
     maxFileBytes: 50 * 1024 * 1024,
     acceptedExt: ['pdf', 'doc', 'docx', 'pptx', 'png', 'jpg', 'jpeg', 'webp'],
-    // Optional default endpoint, e.g. the Terraform `function_url` output.
-    defaultApiUrl: '',
+    // Same-origin path the ALB routes to the Lambda (Terraform `alb_path_pattern`).
+    defaultApiUrl: '/api/document-processor',
+    pollIntervalMs: 4000,
+    pollTimeoutMs: 20 * 60 * 1000,
     storageKey: 'docproc.settings',
   };
 
@@ -85,7 +89,7 @@
 
   const api = {
     async call(body) {
-      if (!current.apiUrl) throw new Error('Set the Lambda function URL under Connection first.');
+      if (!current.apiUrl) throw new Error('Set the API endpoint under Connection first.');
 
       const headers = { 'Content-Type': 'application/json' };
       if (current.apiKey) headers['x-api-key'] = current.apiKey;
@@ -94,7 +98,7 @@
       try {
         res = await fetch(current.apiUrl, { method: 'POST', headers, body: JSON.stringify(body) });
       } catch (_) {
-        throw new Error('Could not reach the Lambda function URL. Check the URL and CORS settings.');
+        throw new Error('Could not reach the API. Check the endpoint under Connection.');
       }
 
       const data = await res.json().catch(() => ({}));
@@ -127,8 +131,32 @@
       });
     },
 
-    process(key) {
+    startProcessing(key) {
       return api.call({ action: 'process', key });
+    },
+
+    /** Poll until the conversion finishes. Resolves with the links, rejects on failure. */
+    async waitForResult(key) {
+      const deadline = Date.now() + CONFIG.pollTimeoutMs;
+      let failures = 0;
+
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, CONFIG.pollIntervalMs));
+
+        let status;
+        try {
+          status = await api.call({ action: 'status', key });
+          failures = 0;
+        } catch (err) {
+          // Ride out a blip or two; give up if the API stays unreachable.
+          if (++failures >= 3) throw err;
+          continue;
+        }
+
+        if (status.state === 'done') return status;
+        if (status.state === 'error') throw new Error(status.error || 'Processing failed.');
+      }
+      throw new Error('Still processing after 20 minutes. Check the Lambda logs.');
     },
   };
 
@@ -264,7 +292,8 @@
       await api.uploadToS3(upload, file, (progress) => update(id, { progress }));
       update(id, { status: 'processing', processingSince: Date.now() });
 
-      const result = await api.process(upload.key);
+      await api.startProcessing(upload.key);
+      const result = await api.waitForResult(upload.key);
       update(id, { status: 'done', result });
     } catch (err) {
       update(id, { status: 'error', error: err.message || String(err) });

@@ -69,13 +69,41 @@ variable "upload_api_key" {
   type        = string
   default     = ""
   sensitive   = true
-  description = "Access key the UI must send (x-api-key) to call the function URL. Empty disables the check."
+  description = "Access key the UI must send (x-api-key) to call the API. Empty disables the check."
 }
 
 variable "ui_allowed_origins" {
   type        = list(string)
   default     = ["*"]
-  description = "Origins allowed to call the function URL and upload to the bucket from a browser."
+  description = "Origins (the site hosting the UI, e.g. https://docs.example.com) allowed to upload to the bucket from a browser."
+}
+
+variable "alb_listener_arn" {
+  type        = string
+  description = "ARN of the existing ALB listener (usually HTTPS :443) that serves the site."
+}
+
+variable "alb_rule_priority" {
+  type        = number
+  description = "Priority for the new listener rule. Must be unused on that listener and lower than any catch-all rule."
+}
+
+variable "alb_path_pattern" {
+  type        = string
+  default     = "/api/document-processor"
+  description = "Path on the site that routes to this Lambda. The UI calls this path."
+}
+
+variable "alb_host_headers" {
+  type        = list(string)
+  default     = []
+  description = "Optional host names to match as well, if the listener serves several sites."
+}
+
+variable "alb_target_group_name" {
+  type        = string
+  default     = "document-processor-api"
+  description = "Name of the Lambda target group (max 32 characters)."
 }
 
 variable "manage_bucket_cors" {

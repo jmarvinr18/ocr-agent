@@ -5,6 +5,7 @@ import json
 import os
 import re
 import uuid
+from http import HTTPStatus
 
 import boto3
 import pymupdf
@@ -36,10 +37,13 @@ s3 = boto3.client(
     config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
 )
 
+lambda_client = boto3.client("lambda", region_name="ap-southeast-1")
+
 OUTPUT_BUCKET = os.getenv("OUTPUT_BUCKET")
 OUTPUT_PREFIX = os.getenv("OUTPUT_PREFIX", "markdown/")
 UPLOAD_PREFIX = os.getenv("UPLOAD_PREFIX", "uploads/")
 UPLOAD_API_KEY = os.getenv("UPLOAD_API_KEY", "")
+STATUS_FILE = "status.json"
 LINK_TTL_SECONDS = int(os.getenv("LINK_TTL_SECONDS", "3600"))
 
 UPLOAD_TYPES = {
@@ -131,13 +135,19 @@ def _process(source, output_key=None):
     }
 
 
-# --- HTTP API (Lambda function URL, used by the upload UI) -----------------
+# --- HTTP API (ALB -> Lambda target group, used by the upload UI) ----------
+#
+# The ALB times out long before a big PDF is done, so "process" only queues the
+# work (async self-invoke) and the UI polls "status". Progress is tracked in a
+# small status.json next to the uploaded file: uploads/<id>/status.json
 
 
 def _http_response(status, body):
     return {
         "statusCode": status,
-        "headers": {"Content-Type": "application/json"},
+        "statusDescription": f"{status} {HTTPStatus(status).phrase}",
+        "isBase64Encoded": False,
+        "headers": {"Content-Type": "application/json", "Cache-Control": "no-store"},
         "body": json.dumps(body),
     }
 
@@ -150,7 +160,27 @@ def _presigned_get(key, **params):
     )
 
 
-def _create_upload(body):
+def _upload_key(body):
+    key = str(body.get("key", ""))
+    if not key.startswith(UPLOAD_PREFIX) or ".." in key or key.endswith(STATUS_FILE):
+        raise ValueError("Invalid upload key")
+    return key
+
+
+def _status_key(upload_key):
+    return f"{upload_key.rsplit('/', 1)[0]}/{STATUS_FILE}"
+
+
+def _write_status(upload_key, **status):
+    s3.put_object(
+        Bucket=OUTPUT_BUCKET,
+        Key=_status_key(upload_key),
+        Body=json.dumps(status).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _create_upload(body, context):
     """Return a presigned POST the browser uses to upload straight to S3."""
     filename = os.path.basename(str(body.get("filename", ""))).strip()
     ext = os.path.splitext(filename)[1].lstrip(".").lower()
@@ -174,29 +204,64 @@ def _create_upload(body):
     return {"key": key, "url": upload["url"], "fields": upload["fields"]}
 
 
-def _process_upload(body):
-    key = str(body.get("key", ""))
-    if not key.startswith(UPLOAD_PREFIX) or ".." in key:
-        raise ValueError("Invalid upload key")
+def _start_processing(body, context):
+    """Queue an uploaded file for processing and return immediately."""
+    key = _upload_key(body)
+    _write_status(key, state="processing")
+    lambda_client.invoke(
+        FunctionName=context.invoked_function_arn,
+        InvocationType="Event",
+        Payload=json.dumps({"process_upload": key}).encode("utf-8"),
+    )
+    return {"state": "processing", "key": key}
 
-    result = _process(_presigned_get(key))
+
+def _get_status(body, context):
+    key = _upload_key(body)
+    try:
+        obj = s3.get_object(Bucket=OUTPUT_BUCKET, Key=_status_key(key))
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("NoSuchKey", "AccessDenied"):
+            raise ValueError("No processing job found for this upload")
+        raise
+    status = json.loads(obj["Body"].read())
+
+    if status["state"] != "done":
+        return status
+
     return {
-        **result,
+        **status,
         "document_key": key,
         "document_url": _presigned_get(key),
         # Served as plain text so the link opens in the browser instead of downloading.
         "markdown_url": _presigned_get(
-            result["key"], ResponseContentType="text/plain; charset=utf-8"
+            status["key"], ResponseContentType="text/plain; charset=utf-8"
         ),
         "expires_in": LINK_TTL_SECONDS,
     }
 
 
-HTTP_ACTIONS = {"create_upload": _create_upload, "process": _process_upload}
+def _run_upload_job(upload_key):
+    """Async worker: convert an uploaded file and record the outcome in status.json."""
+    try:
+        result = _process(_presigned_get(upload_key))
+        _write_status(upload_key, state="done", **result)
+    except Exception as e:
+        # Swallow the error so Lambda doesn't retry the whole (slow, paid) conversion.
+        print(f"ERROR processing {upload_key}: {e!r}")
+        message = str(e) if isinstance(e, ValueError) else "Processing failed. Check the Lambda logs for details."
+        _write_status(upload_key, state="error", error=message)
 
 
-def _handle_http(event):
-    if event["requestContext"]["http"]["method"] != "POST":
+HTTP_ACTIONS = {
+    "create_upload": _create_upload,
+    "process": _start_processing,
+    "status": _get_status,
+}
+
+
+def _handle_http(event, context):
+    if event.get("httpMethod") != "POST":
         return _http_response(405, {"error": "Use POST"})
 
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
@@ -212,12 +277,12 @@ def _handle_http(event):
         action = HTTP_ACTIONS.get(body.get("action"))
         if action is None:
             return _http_response(400, {"error": f"Unknown action: {body.get('action')}"})
-        return _http_response(200, action(body))
-    except (ValueError, json.JSONDecodeError) as e:
+        return _http_response(200, action(body, context))
+    except ValueError as e:  # includes json.JSONDecodeError
         return _http_response(400, {"error": str(e)})
     except Exception as e:
         print(f"ERROR: {e!r}")
-        return _http_response(500, {"error": "Processing failed. Check the Lambda logs for details."})
+        return _http_response(500, {"error": "Request failed. Check the Lambda logs for details."})
 
 
 def lambda_handler(event, context):
@@ -228,12 +293,16 @@ def lambda_handler(event, context):
 
         Supported: PDF, PNG, JPEG, WEBP, DOC, DOCX, PPTX.
 
-        Invoked directly with {"source": ..., "output_key"?: ...}, or over the
-        function URL by the upload UI (see _handle_http).
+        Invoked directly with {"source": ..., "output_key"?: ...}, by the ALB
+        for the upload UI (see _handle_http), or asynchronously by itself with
+        {"process_upload": key} to do the actual conversion of an upload.
     """
 
-    if "http" in event.get("requestContext", {}):
-        return _handle_http(event)
+    if "elb" in event.get("requestContext", {}):
+        return _handle_http(event, context)
+
+    if "process_upload" in event:
+        return _run_upload_job(event["process_upload"])
 
     source = event["source"]
     print(f"SOURCE: {source}")

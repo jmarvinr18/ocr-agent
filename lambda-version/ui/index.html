@@ -70,11 +70,11 @@
   <dialog class="dialog" id="settingsDialog" aria-labelledby="settingsTitle">
     <form method="dialog" class="dialog__form" id="settingsForm">
       <h2 id="settingsTitle">Connection</h2>
-      <p class="dialog__note">Use the <code>function_url</code> output from Terraform. Settings are saved in this browser only.</p>
+      <p class="dialog__note">The path the load balancer routes to the document processor (default <code>/api/document-processor</code>). Settings are saved in this browser only.</p>
 
       <label class="field">
-        <span class="field__label">Lambda function URL</span>
-        <input type="url" id="apiUrl" placeholder="https://xxxx.lambda-url.ap-southeast-1.on.aws/" required autocomplete="off">
+        <span class="field__label">API endpoint</span>
+        <input type="text" id="apiUrl" placeholder="/api/document-processor" required autocomplete="off">
       </label>
 
       <label class="field">

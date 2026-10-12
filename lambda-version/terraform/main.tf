@@ -53,7 +53,24 @@ module "role" {
               "s3:DeleteObject",
               "s3:ListBucket"
             ]
-            Resource = "arn:aws:s3:::${var.s3_bucket}/*"
+            Resource = [
+              "arn:aws:s3:::${var.s3_bucket}",
+              "arn:aws:s3:::${var.s3_bucket}/*"
+            ]
+          }
+        ]
+      })
+    },
+    {
+      # Upload jobs run as an async invocation of this same function.
+      name = "self-invoke"
+      policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [
+          {
+            Effect   = "Allow"
+            Action   = ["lambda:InvokeFunction"]
+            Resource = "arn:aws:lambda:${var.region}:${var.client_account_id}:function:${var.function_name}"
           }
         ]
       })
@@ -153,34 +170,63 @@ module "function" {
   tags = var.tags
 }
 
-# Public HTTPS endpoint for the upload UI. Requests are checked against
-# UPLOAD_API_KEY inside the function (x-api-key header) when it is set.
-resource "aws_lambda_function_url" "this" {
-  function_name      = module.function.function_name
-  authorization_type = "NONE"
-
-  cors {
-    allow_origins = var.ui_allowed_origins
-    allow_methods = ["POST"]
-    allow_headers = ["content-type", "x-api-key"]
-    max_age       = 3600
-  }
-}
-
-resource "aws_lambda_permission" "function_url" {
-  statement_id           = "AllowPublicFunctionUrl"
-  action                 = "lambda:InvokeFunctionUrl"
+# Async upload jobs record their own failures in status.json, so a Lambda
+# retry would only repeat a slow, paid conversion.
+resource "aws_lambda_function_event_invoke_config" "this" {
   function_name          = module.function.function_name
-  principal              = "*"
-  function_url_auth_type = "NONE"
+  maximum_retry_attempts = 0
 }
 
-resource "aws_lambda_permission" "function_url_invoke" {
-  statement_id             = "AllowPublicInvokeViaFunctionUrl"
-  action                   = "lambda:InvokeFunction"
-  function_name            = module.function.function_name
-  principal                = "*"
-  invoked_via_function_url = true
+# --- Upload UI API: existing ALB -> Lambda target group ----------------------
+# Requests are checked against UPLOAD_API_KEY inside the function (x-api-key
+# header) when it is set.
+
+resource "aws_lb_target_group" "upload_api" {
+  name        = var.alb_target_group_name
+  target_type = "lambda"
+  tags        = var.tags
+}
+
+resource "aws_lambda_permission" "alb" {
+  statement_id  = "AllowExecutionFromALB"
+  action        = "lambda:InvokeFunction"
+  function_name = module.function.function_name
+  principal     = "elasticloadbalancing.amazonaws.com"
+  source_arn    = aws_lb_target_group.upload_api.arn
+}
+
+resource "aws_lb_target_group_attachment" "upload_api" {
+  target_group_arn = aws_lb_target_group.upload_api.arn
+  target_id        = module.function.arn
+
+  depends_on = [aws_lambda_permission.alb]
+}
+
+resource "aws_lb_listener_rule" "upload_api" {
+  listener_arn = var.alb_listener_arn
+  priority     = var.alb_rule_priority
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.upload_api.arn
+  }
+
+  condition {
+    path_pattern {
+      values = [var.alb_path_pattern]
+    }
+  }
+
+  dynamic "condition" {
+    for_each = length(var.alb_host_headers) > 0 ? [1] : []
+    content {
+      host_header {
+        values = var.alb_host_headers
+      }
+    }
+  }
+
+  tags = var.tags
 }
 
 # The UI uploads straight to S3 with a presigned POST, which needs CORS on the bucket.

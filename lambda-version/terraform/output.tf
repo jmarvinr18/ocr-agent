@@ -14,7 +14,6 @@ output "role_arn" {
   value = module.role.arn
 }
 
-output "function_url" {
-  description = "Endpoint to set in the upload UI."
-  value       = aws_lambda_function_url.this.function_url
+output "upload_api_target_group_arn" {
+  value = aws_lb_target_group.upload_api.arn
 }
